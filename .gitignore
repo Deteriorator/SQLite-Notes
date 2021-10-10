@@ -50,3 +50,12 @@ modules.order
 Module.symvers
 Mkfile.old
 dkms.conf
+
+# configure 生成文件
+config.cache
+config.log
+confdefs.h
+
+# make 生成文件
+sqlite
+lemon
