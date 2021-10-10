@@ -1,32 +1,13 @@
 /*
-** Copyright (c) 1991, 1994, 1997, 1998 D. Richard Hipp
-**
 ** This file contains all sources (including headers) to the LEMON
 ** LALR(1) parser generator.  The sources have been combined into a
-** single file to make it easy to include LEMON as part of another
-** program.
+** single file to make it easy to include LEMON in the source tree
+** and Makefile of another program.
 **
-** This program is free software; you can redistribute it and/or
-** modify it under the terms of the GNU General Public
-** License as published by the Free Software Foundation; either
-** version 2 of the License, or (at your option) any later version.
-**
-** This program is distributed in the hope that it will be useful,
-** but WITHOUT ANY WARRANTY; without even the implied warranty of
-** MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
-** General Public License for more details.
-** 
-** You should have received a copy of the GNU General Public
-** License along with this library; if not, write to the
-** Free Software Foundation, Inc., 59 Temple Place - Suite 330,
-** Boston, MA  02111-1307, USA.
-**
-** Author contact information:
-**   drh@acm.org
-**   http://www.hwaci.com/drh/
+** The author of this program disclaims copyright.
 */
 #include <stdio.h>
-#include <varargs.h>
+#include <stdarg.h>
 #include <string.h>
 #include <ctype.h>
 
@@ -89,7 +70,7 @@ void Configlist_eat(/* struct config * */);
 void Configlist_reset(/* void */);
 
 /********* From the file "error.h" ***************************************/
-void ErrorMsg( /* char *, int, char *, ... */ );
+void ErrorMsg(const char *, int,const char *, ...);
 
 /****** From the file "option.h" ******************************************/
 struct s_options {
@@ -99,11 +80,11 @@ struct s_options {
   char *arg;
   char *message;
 };
-int    optinit(/* char**,struct s_options*,FILE* */);
-int    optnargs(/* void */);
-char  *optarg(/* int */);
-void   opterr(/* int */);
-void   optprint(/* void */);
+int    OptInit(/* char**,struct s_options*,FILE* */);
+int    OptNArgs(/* void */);
+char  *OptArg(/* int */);
+void   OptErr(/* int */);
+void   OptPrint(/* void */);
 
 /******** From the file "parse.h" *****************************************/
 void Parse(/* struct lemon *lemp */);
@@ -136,7 +117,7 @@ int SetUnion(/* char *A,char *B */);    /* A <- A U B, thru element N */
 ** Principal data structures for the LEMON parser generator.
 */
 
-typedef enum {FALSE=0, TRUE} Boolean;
+typedef enum {B_FALSE=0, B_TRUE} Boolean;
 
 /* Symbols (terminals and nonterminals) of the grammar are stored
 ** in the following: */
@@ -148,6 +129,7 @@ struct symbol {
     NONTERMINAL
   } type;                  /* Symbols are all either TERMINALS or NTs */
   struct rule *rule;       /* Linked list of rules of this (if an NT) */
+  struct symbol *fallback; /* fallback token in case this token doesn't parse */
   int prec;                /* Precedence if defined (-1 otherwise) */
   enum e_assoc {
     LEFT,
@@ -263,6 +245,7 @@ struct lemon {
   char *name;              /* Name of the generated parser */
   char *arg;               /* Declaration of the 3th argument to parser */
   char *tokentype;         /* Type of terminal symbols in the parser stack */
+  char *vartype;           /* The default type of non-terminal symbols */
   char *start;             /* Name of the start symbol for the grammar */
   char *stacksize;         /* Size of the parser stack */
   char *include;           /* Code to put at the start of the C file */
@@ -279,12 +262,15 @@ struct lemon {
   int  extracodeln;        /* Line number for the start of the extra code */
   char *tokendest;         /* Code to execute to destroy token data */
   int  tokendestln;        /* Line number for token destroyer code */
+  char *vardest;           /* Code for the default non-terminal destructor */
+  int  vardestln;          /* Line number for default non-term destructor code*/
   char *filename;          /* Name of the input file */
   char *outname;           /* Name of the current output file */
   char *tokenprefix;       /* A prefix added to token names in the .h file */
   int nconflict;           /* Number of parsing conflicts */
   int tablesize;           /* Size of the parse tables */
   int basisflag;           /* Print only basis configurations */
+  int has_fallback;        /* True if any %fallback is seen in the grammer */
   char *argv0;             /* Name of the program */
 };
 
@@ -375,7 +361,8 @@ struct action *ap2;
   rc = ap1->sp->index - ap2->sp->index;
   if( rc==0 ) rc = (int)ap1->type - (int)ap2->type;
   if( rc==0 ){
-    assert( ap1->type==REDUCE && ap2->type==REDUCE );
+    assert( ap1->type==REDUCE || ap1->type==RD_RESOLVED || ap1->type==CONFLICT);
+    assert( ap2->type==REDUCE || ap2->type==RD_RESOLVED || ap2->type==CONFLICT);
     rc = ap1->x.rp->index - ap2->x.rp->index;
   }
   return rc;
@@ -464,7 +451,7 @@ struct lemon *lemp;
   int progress;
 
   for(i=0; i<lemp->nsymbol; i++){
-    lemp->symbols[i]->lambda = FALSE;
+    lemp->symbols[i]->lambda = B_FALSE;
   }
   for(i=lemp->nterminal; i<lemp->nsymbol; i++){
     lemp->symbols[i]->firstset = SetNew();
@@ -476,10 +463,10 @@ struct lemon *lemp;
     for(rp=lemp->rule; rp; rp=rp->next){
       if( rp->lhs->lambda ) continue;
       for(i=0; i<rp->nrhs; i++){
-         if( rp->rhs[i]->lambda==FALSE ) break;
+         if( rp->rhs[i]->lambda==B_FALSE ) break;
       }
       if( i==rp->nrhs ){
-        rp->lhs->lambda = TRUE;
+        rp->lhs->lambda = B_TRUE;
         progress = 1;
       }
     }
@@ -497,10 +484,10 @@ struct lemon *lemp;
           progress += SetAdd(s1->firstset,s2->index);
           break;
 	}else if( s1==s2 ){
-          if( s1->lambda==FALSE ) break;
+          if( s1->lambda==B_FALSE ) break;
 	}else{
           progress += SetUnion(s1->firstset,s2->firstset);
-          if( s2->lambda==FALSE ) break;
+          if( s2->lambda==B_FALSE ) break;
 	}
       }
     }
@@ -785,7 +772,7 @@ struct lemon *lemp;
     stp = lemp->sorted[i];
     assert( stp->ap );
     stp->ap = Action_sort(stp->ap);
-    for(ap=stp->ap; ap && ap->next; ap=nap){
+    for(ap=stp->ap; ap && ap->next; ap=ap->next){
       for(nap=ap->next; nap && nap->sp==ap->sp; nap=nap->next){
          /* The two actions "ap" and "nap" have the same lookahead.
          ** Figure out which one should be used */
@@ -795,11 +782,11 @@ struct lemon *lemp;
   }
 
   /* Report an error for each rule that can never be reduced. */
-  for(rp=lemp->rule; rp; rp=rp->next) rp->canReduce = FALSE;
+  for(rp=lemp->rule; rp; rp=rp->next) rp->canReduce = B_FALSE;
   for(i=0; i<lemp->nstate; i++){
     struct action *ap;
     for(ap=lemp->sorted[i]->ap; ap; ap=ap->next){
-      if( ap->type==REDUCE ) ap->x.rp->canReduce = TRUE;
+      if( ap->type==REDUCE ) ap->x.rp->canReduce = B_TRUE;
     }
   }
   for(rp=lemp->rule; rp; rp=rp->next){
@@ -863,9 +850,17 @@ struct symbol *errsym;   /* The error symbol (if defined.  NULL otherwise) */
       apx->type = RD_RESOLVED;
     }
   }else{
-    /* Can't happen.  Shifts have to come before Reduces on the
-    ** list because the reduces were added last.  Hence, if apx->type==REDUCE
-    ** then it is impossible for apy->type==SHIFT */
+    assert( 
+      apx->type==SH_RESOLVED ||
+      apx->type==RD_RESOLVED ||
+      apx->type==CONFLICT ||
+      apy->type==SH_RESOLVED ||
+      apy->type==RD_RESOLVED ||
+      apy->type==CONFLICT
+    );
+    /* The REDUCE/SHIFT case cannot happen because SHIFTs come before
+    ** REDUCEs on the list.  If we reach this point it must be because
+    ** the parser conflict had already been resolved. */
   }
   return errcnt;
 }
@@ -1015,7 +1010,7 @@ struct lemon *lemp;
             break;
 	  }else{
             SetUnion(newcfp->fws,xsp->firstset);
-            if( xsp->lambda==FALSE ) break;
+            if( xsp->lambda==B_FALSE ) break;
 	  }
 	}
         if( i==rp->nrhs ) Plink_add(&cfp->fplp,newcfp);
@@ -1107,12 +1102,7 @@ int max;
 #define ERRMSGSIZE  10000 /* Hope this is big enough.  No way to error check */
 #define LINEWIDTH      79 /* Max width of any output line */
 #define PREFIXLIMIT    30 /* Max width of the prefix on each line */
-void ErrorMsg(va_alist)
-va_dcl
-{
-  char *filename;
-  int lineno;
-  char *format;
+void ErrorMsg(const char *filename, int lineno, const char *format, ...){
   char errmsg[ERRMSGSIZE];
   char prefix[PREFIXLIMIT+10];
   int errmsgsize;
@@ -1121,10 +1111,7 @@ va_dcl
   va_list ap;
   int end, restart, base;
 
-  va_start(ap);
-  filename = va_arg(ap,char*);
-  lineno = va_arg(ap,int);
-  format = va_arg(ap,char*);
+  va_start(ap, format);
   /* Prepare a prefix to be prepended to every output line */
   if( lineno>0 ){
     sprintf(prefix,"%.*s:%d: ",PREFIXLIMIT-10,filename,lineno);
@@ -1192,15 +1179,12 @@ char **argv;
   int i;
   struct lemon lem;
 
-  optinit(argv,options,stderr);
+  OptInit(argv,options,stderr);
   if( version ){
-     printf("Lemon version 1.0\n"
-       "Copyright 1991-1997 by D. Richard Hipp\n"
-       "Freely distributable under the GNU Public License.\n"
-     );
+     printf("Lemon version 1.0\n");
      exit(0); 
   }
-  if( optnargs()!=1 ){
+  if( OptNArgs()!=1 ){
     fprintf(stderr,"Exactly one filename argument is required.\n");
     exit(1);
   }
@@ -1211,13 +1195,16 @@ char **argv;
   Symbol_init();
   State_init();
   lem.argv0 = argv[0];
-  lem.filename = optarg(0);
+  lem.filename = OptArg(0);
   lem.basisflag = basisflag;
+  lem.has_fallback = 0;
   lem.nconflict = 0;
   lem.name = lem.include = lem.arg = lem.tokentype = lem.start = 0;
+  lem.vartype = 0;
   lem.stacksize = 0;
   lem.error = lem.overflow = lem.failure = lem.accept = lem.tokendest =
      lem.tokenprefix = lem.outname = lem.extracode = 0;
+  lem.vardest = 0;
   lem.tablesize = 0;
   Symbol_new("$");
   lem.errsym = Symbol_new("error");
@@ -1321,7 +1308,7 @@ char **argv;
 /*
 ** Return a pointer to the next structure in the linked list.
 */
-#define NEXT(A) (*(char**)(((int)A)+offset))
+#define NEXT(A) (*(char**)(((unsigned long)A)+offset))
 
 /*
 ** Inputs:
@@ -1395,11 +1382,11 @@ char *list;
 char **next;
 int (*cmp)();
 {
-  int offset;
+  unsigned long offset;
   char *ep;
   char *set[LISTSIZE];
   int i;
-  offset = (int)next - (int)list;
+  offset = (unsigned long)next - (unsigned long)list;
   for(i=0; i<LISTSIZE; i++) set[i] = 0;
   while( list ){
     ep = list;
@@ -1547,7 +1534,7 @@ FILE *err;
         if( *end ){
           if( err ){
             fprintf(err,"%sillegal character in floating-point argument.\n",emsg);
-            errline(i,((int)end)-(int)argv[i],err);
+            errline(i,((unsigned long)end)-(unsigned long)argv[i],err);
           }
           errcnt++;
         }
@@ -1558,7 +1545,7 @@ FILE *err;
         if( *end ){
           if( err ){
             fprintf(err,"%sillegal character in integer argument.\n",emsg);
-            errline(i,((int)end)-(int)argv[i],err);
+            errline(i,((unsigned long)end)-(unsigned long)argv[i],err);
           }
           errcnt++;
         }
@@ -1595,7 +1582,7 @@ FILE *err;
   return errcnt;
 }
 
-int optinit(a,o,err)
+int OptInit(a,o,err)
 char **a;
 struct s_options *o;
 FILE *err;
@@ -1616,13 +1603,13 @@ FILE *err;
   }
   if( errcnt>0 ){
     fprintf(err,"Valid command line options for \"%s\" are:\n",*a);
-    optprint();
+    OptPrint();
     exit(1);
   }
   return 0;
 }
 
-int optnargs(){
+int OptNArgs(){
   int cnt = 0;
   int dashdash = 0;
   int i;
@@ -1635,7 +1622,7 @@ int optnargs(){
   return cnt;
 }
 
-char *optarg(n)
+char *OptArg(n)
 int n;
 {
   int i;
@@ -1643,7 +1630,7 @@ int n;
   return i>=0 ? argv[i] : 0;
 }
 
-void opterr(n)
+void OptErr(n)
 int n;
 {
   int i;
@@ -1651,7 +1638,7 @@ int n;
   if( i>=0 ) errline(i,0,errstream);
 }
 
-void optprint(){
+void OptPrint(){
   int i;
   int max, len;
   max = 0;
@@ -1730,8 +1717,10 @@ struct pstate {
     RESYNC_AFTER_RULE_ERROR,
     RESYNC_AFTER_DECL_ERROR,
     WAITING_FOR_DESTRUCTOR_SYMBOL,
-    WAITING_FOR_DATATYPE_SYMBOL
+    WAITING_FOR_DATATYPE_SYMBOL,
+    WAITING_FOR_FALLBACK_ID
   } state;                   /* The state of the parser */
+  struct symbol *fallback;   /* The fallback token */
   struct symbol *lhs;        /* Left-hand side of current rule */
   char *lhsalias;            /* Alias for the LHS */
   int nrhs;                  /* Number of right-hand side symbols seen */
@@ -1966,6 +1955,9 @@ to follow the previous rule.");
 	}else if( strcmp(x,"token_destructor")==0 ){
           psp->declargslot = &psp->gp->tokendest;
           psp->decllnslot = &psp->gp->tokendestln;
+	}else if( strcmp(x,"default_destructor")==0 ){
+          psp->declargslot = &psp->gp->vardest;
+          psp->decllnslot = &psp->gp->vardestln;
 	}else if( strcmp(x,"token_prefix")==0 ){
           psp->declargslot = &psp->gp->tokenprefix;
 	}else if( strcmp(x,"syntax_error")==0 ){
@@ -1984,6 +1976,8 @@ to follow the previous rule.");
           psp->declargslot = &(psp->gp->arg);
         }else if( strcmp(x,"token_type")==0 ){
           psp->declargslot = &(psp->gp->tokentype);
+        }else if( strcmp(x,"default_type")==0 ){
+          psp->declargslot = &(psp->gp->vartype);
         }else if( strcmp(x,"stack_size")==0 ){
           psp->declargslot = &(psp->gp->stacksize);
         }else if( strcmp(x,"start_symbol")==0 ){
@@ -2004,6 +1998,9 @@ to follow the previous rule.");
           psp->state = WAITING_FOR_DESTRUCTOR_SYMBOL;
 	}else if( strcmp(x,"type")==0 ){
           psp->state = WAITING_FOR_DATATYPE_SYMBOL;
+        }else if( strcmp(x,"fallback")==0 ){
+          psp->fallback = 0;
+          psp->state = WAITING_FOR_FALLBACK_ID;
         }else{
           ErrorMsg(psp->filename,psp->tokenlineno,
             "Unknown declaration keyword: \"%%%s\".",x);
@@ -2081,6 +2078,27 @@ to follow the previous rule.");
           "Illegal argument to %%%s: %s",psp->declkeyword,x);
         psp->errorcnt++;
         psp->state = RESYNC_AFTER_DECL_ERROR;
+      }
+      break;
+    case WAITING_FOR_FALLBACK_ID:
+      if( x[0]=='.' ){
+        psp->state = WAITING_FOR_DECL_OR_RULE;
+      }else if( !isupper(x[0]) ){
+        ErrorMsg(psp->filename, psp->tokenlineno,
+          "%%fallback argument \"%s\" should be a token", x);
+        psp->errorcnt++;
+      }else{
+        struct symbol *sp = Symbol_new(x);
+        if( psp->fallback==0 ){
+          psp->fallback = sp;
+        }else if( sp->fallback ){
+          ErrorMsg(psp->filename, psp->tokenlineno,
+            "More than one fallback assigned to token %s", x);
+          psp->errorcnt++;
+        }else{
+          sp->fallback = psp->fallback;
+          psp->gp->has_fallback = 1;
+        }
       }
       break;
     case RESYNC_AFTER_RULE_ERROR:
@@ -2209,7 +2227,7 @@ struct lemon *gp;
 	}
       }
       if( c==0 ){
-        ErrorMsg(ps.filename,startline,
+        ErrorMsg(ps.filename,ps.tokenlineno,
 "C code starting on this line is not terminated before the end of the file.");
         ps.errorcnt++;
         nextcp = cp;
@@ -2636,12 +2654,14 @@ struct lemon *lemp;
 
   cp = strrchr(lemp->filename,'.');
   if( cp ){
-    sprintf(buf,"%.*s.lt",(int)cp-(int)lemp->filename,lemp->filename);
+    sprintf(buf,"%.*s.lt",(unsigned long)cp-(unsigned long)lemp->filename,lemp->filename);
   }else{
     sprintf(buf,"%s.lt",lemp->filename);
   }
   if( access(buf,004)==0 ){
     tpltname = buf;
+  }else if( access(templatename,004)==0 ){
+    tpltname = templatename;
   }else{
     tpltname = pathsearch(lemp->argv0,templatename,0);
   }
@@ -2696,10 +2716,13 @@ int *lineno;
    cp = lemp->tokendest;
    if( cp==0 ) return;
    fprintf(out,"#line %d \"%s\"\n{",lemp->tokendestln,lemp->filename);
- }else{
+ }else if( sp->destructor ){
    cp = sp->destructor;
-   if( cp==0 ) return;
    fprintf(out,"#line %d \"%s\"\n{",sp->destructorln,lemp->filename);
+ }else if( lemp->vardest ){
+   cp = lemp->vardest;
+   if( cp==0 ) return;
+   fprintf(out,"#line %d \"%s\"\n{",lemp->vardestln,lemp->filename);
  }
  for(; *cp; cp++){
    if( *cp=='$' && cp[1]=='$' ){
@@ -2716,7 +2739,7 @@ int *lineno;
 }
 
 /*
-** Return TRUE (non-zero) if the given symbol has a distructor.
+** Return TRUE (non-zero) if the given symbol has a destructor.
 */
 int has_destructor(sp, lemp)
 struct symbol *sp;
@@ -2726,7 +2749,7 @@ struct lemon *lemp;
   if( sp->type==TERMINAL ){
     ret = lemp->tokendest!=0;
   }else{
-    ret = sp->destructor!=0;
+    ret = lemp->vardest!=0 || sp->destructor!=0;
   }
   return ret;
 }
@@ -2754,9 +2777,9 @@ int *lineno;
  if( rp->code ){
    fprintf(out,"#line %d \"%s\"\n{",rp->line,lemp->filename);
    for(cp=rp->code; *cp; cp++){
-     if( isalpha(*cp) && (cp==rp->code || !isalnum(cp[-1])) ){
+     if( isalpha(*cp) && (cp==rp->code || (!isalnum(cp[-1]) && cp[-1]!='_')) ){
        char saved;
-       for(xp= &cp[1]; isalnum(*xp); xp++);
+       for(xp= &cp[1]; isalnum(*xp) || *xp=='_'; xp++);
        saved = *xp;
        *xp = 0;
        if( rp->lhsalias && strcmp(cp,rp->lhsalias)==0 ){
@@ -2795,7 +2818,7 @@ int *lineno;
  for(i=0; i<rp->nrhs; i++){
    if( rp->rhsalias[i] && !used[i] ){
      ErrorMsg(lemp->filename,rp->ruleline,
-       "Label $%s$ for \"%s(%s)\" is never used.",
+       "Label %s for \"%s(%s)\" is never used.",
        rp->rhsalias[i],rp->rhs[i]->name,rp->rhsalias[i]);
      lemp->errorcnt++;
    }else if( rp->rhsalias[i]==0 ){
@@ -2839,6 +2862,9 @@ int mhflag;                 /* True if generating makeheaders output */
   types = (char**)malloc( arraysize * sizeof(char*) );
   for(i=0; i<arraysize; i++) types[i] = 0;
   maxdtlength = 0;
+  if( lemp->vartype ){
+    maxdtlength = strlen(lemp->vartype);
+  }
   for(i=0; i<lemp->nsymbol; i++){
     int len;
     struct symbol *sp = lemp->symbols[i];
@@ -2854,8 +2880,10 @@ int mhflag;                 /* True if generating makeheaders output */
 
   /* Build a hash table of datatypes. The ".dtnum" field of each symbol
   ** is filled in with the hash index plus 1.  A ".dtnum" value of 0 is
-  ** used for terminal symbols and for nonterminals which don't specify
-  ** a datatype using the %type directive. */
+  ** used for terminal symbols.  If there is no %default_type defined then
+  ** 0 is also used as the .dtnum value for nonterminals which do not specify
+  ** a datatype using the %type directive.
+  */
   for(i=0; i<lemp->nsymbol; i++){
     struct symbol *sp = lemp->symbols[i];
     char *cp;
@@ -2863,11 +2891,12 @@ int mhflag;                 /* True if generating makeheaders output */
       sp->dtnum = arraysize+1;
       continue;
     }
-    if( sp->type!=NONTERMINAL || sp->datatype==0 ){
+    if( sp->type!=NONTERMINAL || (sp->datatype==0 && lemp->vartype==0) ){
       sp->dtnum = 0;
       continue;
     }
     cp = sp->datatype;
+    if( cp==0 ) cp = lemp->vartype;
     j = 0;
     while( isspace(*cp) ) cp++;
     while( *cp ) stddt[j++] = *cp++;
@@ -2919,6 +2948,20 @@ int mhflag;                 /* True if generating makeheaders output */
   *plineno = lineno;
 }
 
+/*
+** Return the name of a C datatype able to represent values between
+** 0 and N, inclusive.
+*/
+static const char *minimum_size_type(int N){
+  if( N<=255 ){
+    return "unsigned char";
+  }else if( N<65535 ){
+    return "unsigned short int";
+  }else{
+    return "unsigned int";
+  }
+}
+
 /* Generate C source code for the parser */
 void ReportTable(lemp, mhflag)
 struct lemon *lemp;
@@ -2930,7 +2973,7 @@ int mhflag;     /* Output in makeheaders format if true */
   struct state *stp;
   struct action *ap;
   struct rule *rp;
-  int i;
+  int i, j;
   int tablecnt;
   char *name;
 
@@ -2970,10 +3013,10 @@ int mhflag;     /* Output in makeheaders format if true */
   /* Generate the defines */
   fprintf(out,"/* \001 */\n");
   fprintf(out,"#define YYCODETYPE %s\n",
-    lemp->nsymbol>250?"int":"unsigned char");  lineno++;
+    minimum_size_type(lemp->nsymbol+5)); lineno++;
   fprintf(out,"#define YYNOCODE %d\n",lemp->nsymbol+1);  lineno++;
   fprintf(out,"#define YYACTIONTYPE %s\n",
-    lemp->nstate+lemp->nrule>250?"int":"unsigned char");  lineno++;
+    minimum_size_type(lemp->nstate+lemp->nrule+5));  lineno++;
   print_stack_union(out,lemp,&lineno,mhflag);
   if( lemp->stacksize ){
     if( atoi(lemp->stacksize)<=0 ){
@@ -2994,14 +3037,19 @@ int mhflag;     /* Output in makeheaders format if true */
   if( lemp->arg && lemp->arg[0] ){
     int i;
     i = strlen(lemp->arg);
-    while( i>=1 && isalnum(lemp->arg[i-1]) ) i--;
-    fprintf(out,"#define %sARGDECL ,%s\n",name,&lemp->arg[i]);  lineno++;
-    fprintf(out,"#define %sXARGDECL %s;\n",name,lemp->arg);  lineno++;
-    fprintf(out,"#define %sANSIARGDECL ,%s\n",name,lemp->arg);  lineno++;
+    while( i>=1 && isspace(lemp->arg[i-1]) ) i--;
+    while( i>=1 && (isalnum(lemp->arg[i-1]) || lemp->arg[i-1]=='_') ) i--;
+    fprintf(out,"#define %sARG_SDECL %s;\n",name,lemp->arg);  lineno++;
+    fprintf(out,"#define %sARG_PDECL ,%s\n",name,lemp->arg);  lineno++;
+    fprintf(out,"#define %sARG_FETCH %s = yypParser->%s\n",
+                 name,lemp->arg,&lemp->arg[i]);  lineno++;
+    fprintf(out,"#define %sARG_STORE yypParser->%s = %s\n",
+                 name,&lemp->arg[i],&lemp->arg[i]);  lineno++;
   }else{
-    fprintf(out,"#define %sARGDECL\n",name);  lineno++;
-    fprintf(out,"#define %sXARGDECL\n",name);  lineno++;
-    fprintf(out,"#define %sANSIARGDECL\n",name);  lineno++;
+    fprintf(out,"#define %sARG_SDECL\n",name);  lineno++;
+    fprintf(out,"#define %sARG_PDECL\n",name);  lineno++;
+    fprintf(out,"#define %sARG_FETCH\n",name); lineno++;
+    fprintf(out,"#define %sARG_STORE\n",name); lineno++;
   }
   if( mhflag ){
     fprintf(out,"#endif\n"); lineno++;
@@ -3010,6 +3058,9 @@ int mhflag;     /* Output in makeheaders format if true */
   fprintf(out,"#define YYNRULE %d\n",lemp->nrule);  lineno++;
   fprintf(out,"#define YYERRORSYMBOL %d\n",lemp->errsym->index);  lineno++;
   fprintf(out,"#define YYERRSYMDT yy%d\n",lemp->errsym->dtnum);  lineno++;
+  if( lemp->has_fallback ){
+    fprintf(out,"#define YYFALLBACK 1\n");  lineno++;
+  }
   tplt_xfer(lemp->name,in,out,&lineno);
 
   /* Generate the action table.
@@ -3018,13 +3069,16 @@ int mhflag;     /* Output in makeheaders format if true */
   ** structure:
   **   struct yyActionEntry {
   **       YYCODETYPE            lookahead;
+  **       YYCODETYPE            next;
   **       YYACTIONTYPE          action;
-  **       struct yyActionEntry *next;
   **   }
   **
   ** The entries are grouped into hash tables, one hash table for each
-  ** parser state.  The hash table has a size which is the smallest
-  ** power of two needed to hold all entries.
+  ** parser state.  The hash table has a size which is the number of
+  ** entries in that table.  In case of a collision, the "next" value
+  ** contains one more than the index into the hash table of the next
+  ** entry in the collision chain.  A "next" value of 0 means the end
+  ** of the chain has been reached.
   */
   tablecnt = 0;
 
@@ -3044,8 +3098,7 @@ int mhflag;     /* Output in makeheaders format if true */
         stp->naction++;
       }
     }
-    tablesize = 1;
-    while( tablesize<stp->naction ) tablesize += tablesize;
+    tablesize = stp->naction;
     assert( tablesize<= sizeof(table)/sizeof(table[0]) );
     for(j=0; j<tablesize; j++){
       table[j] = 0;
@@ -3060,7 +3113,7 @@ int mhflag;     /* Output in makeheaders format if true */
       if( ap->sp->index==lemp->nsymbol ){
         stp->tabdfltact = action;
       }else if( action>=0 ){
-        h = ap->sp->index & (tablesize-1);
+        h = ap->sp->index % tablesize;
         ap->collide = table[h];
         table[h] = ap;
       }
@@ -3078,24 +3131,18 @@ int mhflag;     /* Output in makeheaders format if true */
     }
 
     /* Print the hash table */
-    fprintf(out,"/* State %d */\n",stp->index); lineno++;
+    if( tablesize>0 ){
+      fprintf(out,"/* State %d */\n",stp->index); lineno++;
+    }
     for(j=0; j<tablesize; j++){
-      if( table[j]==0 ){
-        fprintf(out,
-          "  {YYNOCODE,0,0}, /* Unused */\n");
-      }else{
-        fprintf(out,"  {%4d,%4d, ",
+      assert( table[j]!=0 );
+      fprintf(out,"  {%4d,%4d,%4d}, /* %2d: ",
           table[j]->sp->index,
-          compute_action(lemp,table[j]));
-        if( collide[j]>=0 ){
-          fprintf(out,"&yyActionTable[%4d] }, /* ",
-            collide[j] + tablecnt);
-        }else{
-          fprintf(out,"0                    }, /* ");
-        }
-        PrintAction(table[j],out,22);
-        fprintf(out," */\n"); 
-      }
+          collide[j]+1,
+          compute_action(lemp,table[j]),
+          j+1);
+      PrintAction(table[j],out,22);
+      fprintf(out," */\n"); 
       lineno++;
     }
 
@@ -3110,23 +3157,37 @@ int mhflag;     /* Output in makeheaders format if true */
   ** Each entry is an element of the following structure:
   **    struct yyStateEntry {
   **      struct yyActionEntry *hashtbl;
-  **      int mask;
+  **      YYCODETYPE nEntry;
   **      YYACTIONTYPE actionDefault;
   **    }
   */
   for(i=0; i<lemp->nstate; i++){
-    int tablesize;
     stp = lemp->sorted[i];
-    tablesize = 1;
-    while( tablesize<stp->naction ) tablesize += tablesize;
-    fprintf(out,"  { &yyActionTable[%d], %d, %d},\n",
+    fprintf(out,"  { &yyActionTable[%d],%4d,%4d },\n",
       stp->tabstart,
-      tablesize - 1,
+      stp->naction,
       stp->tabdfltact); lineno++;
   }
   tplt_xfer(lemp->name,in,out,&lineno);
 
-  /* Generate a table containing the symbolic name of every symbol */
+  /* Generate the table of fallback tokens.
+  */
+  if( lemp->has_fallback ){
+    for(i=0; i<lemp->nterminal; i++){
+      struct symbol *p = lemp->symbols[i];
+      if( p->fallback==0 ){
+        fprintf(out, "    0,  /* %10s => nothing */\n", p->name);
+      }else{
+        fprintf(out, "  %3d,  /* %10s => %s */\n", p->fallback->index,
+          p->name, p->fallback->name);
+      }
+      lineno++;
+    }
+  }
+  tplt_xfer(lemp->name, in, out, &lineno);
+
+  /* Generate a table containing the symbolic name of every symbol
+  */
   for(i=0; i<lemp->nsymbol; i++){
     sprintf(line,"\"%s\",",lemp->symbols[i]->name);
     fprintf(out,"  %-15s",line);
@@ -3135,9 +3196,22 @@ int mhflag;     /* Output in makeheaders format if true */
   if( (i&3)!=0 ){ fprintf(out,"\n"); lineno++; }
   tplt_xfer(lemp->name,in,out,&lineno);
 
+  /* Generate a table containing a text string that describes every
+  ** rule in the rule set of the grammer.  This information is used
+  ** when tracing REDUCE actions.
+  */
+  for(i=0, rp=lemp->rule; rp; rp=rp->next, i++){
+    assert( rp->index==i );
+    fprintf(out," /* %3d */ \"%s ::=", i, rp->lhs->name);
+    for(j=0; j<rp->nrhs; j++) fprintf(out," %s",rp->rhs[j]->name);
+    fprintf(out,"\",\n"); lineno++;
+  }
+  tplt_xfer(lemp->name,in,out,&lineno);
+
   /* Generate code which executes every time a symbol is popped from
   ** the stack while processing errors or while destroying the parser. 
-  ** (In other words, generate the %destructor actions) */
+  ** (In other words, generate the %destructor actions)
+  */
   if( lemp->tokendest ){
     for(i=0; i<lemp->nsymbol; i++){
       struct symbol *sp = lemp->symbols[i];
@@ -3156,6 +3230,20 @@ int mhflag;     /* Output in makeheaders format if true */
     fprintf(out,"    case %d:\n",sp->index); lineno++;
     emit_destructor_code(out,lemp->symbols[i],lemp,&lineno);
     fprintf(out,"      break;\n"); lineno++;
+  }
+  if( lemp->vardest ){
+    struct symbol *dflt_sp = 0;
+    for(i=0; i<lemp->nsymbol; i++){
+      struct symbol *sp = lemp->symbols[i];
+      if( sp==0 || sp->type==TERMINAL ||
+          sp->index<=0 || sp->destructor!=0 ) continue;
+      fprintf(out,"    case %d:\n",sp->index); lineno++;
+      dflt_sp = sp;
+    }
+    if( dflt_sp!=0 ){
+      emit_destructor_code(out,dflt_sp,lemp,&lineno);
+      fprintf(out,"      break;\n"); lineno++;
+    }
   }
   tplt_xfer(lemp->name,in,out,&lineno);
 
@@ -3176,9 +3264,6 @@ int mhflag;     /* Output in makeheaders format if true */
   /* Generate code which execution during each REDUCE action */
   for(rp=lemp->rule; rp; rp=rp->next){
     fprintf(out,"      case %d:\n",rp->index); lineno++;
-    fprintf(out,"        YYTRACE(\"%s ::=",rp->lhs->name);
-    for(i=0; i<rp->nrhs; i++) fprintf(out," %s",rp->rhs[i]->name);
-    fprintf(out,"\")\n"); lineno++;
     emit_code(out,rp,lemp,&lineno);
     fprintf(out,"        break;\n"); lineno++;
   }
@@ -3241,48 +3326,59 @@ struct lemon *lemp;
 /* Reduce the size of the action tables, if possible, by making use
 ** of defaults.
 **
-** In this version, if all REDUCE actions use the same rule, make
-** them the default.  Only default them if there are more than one.
+** In this version, we take the most frequent REDUCE action and make
+** it the default.  Only default a reduce if there are more than one.
 */
 void CompressTables(lemp)
 struct lemon *lemp;
 {
   struct state *stp;
-  struct action *ap;
-  struct rule *rp;
+  struct action *ap, *ap2;
+  struct rule *rp, *rp2, *rbest;
+  int nbest, n;
   int i;
   int cnt;
 
   for(i=0; i<lemp->nstate; i++){
     stp = lemp->sorted[i];
+    nbest = 0;
+    rbest = 0;
 
-    /* Find the first REDUCE action */
-    for(ap=stp->ap; ap && ap->type!=REDUCE; ap=ap->next);
-    if( ap==0 ) continue;
-
-    /* Remember the rule used */
-    rp = ap->x.rp;
-
-    /* See if all other REDUCE acitons use the same rule */
-    cnt = 1;
-    for(ap=ap->next; ap; ap=ap->next){
-      if( ap->type==REDUCE ){
-        if( ap->x.rp!=rp ) break;
-        cnt++;
+    for(ap=stp->ap; ap; ap=ap->next){
+      if( ap->type!=REDUCE ) continue;
+      rp = ap->x.rp;
+      if( rp==rbest ) continue;
+      n = 1;
+      for(ap2=ap->next; ap2; ap2=ap2->next){
+        if( ap2->type!=REDUCE ) continue;
+        rp2 = ap2->x.rp;
+        if( rp2==rbest ) continue;
+        if( rp2==rp ) n++;
+      }
+      if( n>nbest ){
+        nbest = n;
+        rbest = rp;
       }
     }
-    if( ap || cnt==1 ) continue;
+ 
+    /* Do not make a default if the number of rules to default
+    ** is not at least 2 */
+    if( nbest<2 ) continue;
 
-    /* Combine all REDUCE actions into a single default */
-    for(ap=stp->ap; ap && ap->type!=REDUCE; ap=ap->next);
+
+    /* Combine matching REDUCE actions into a single default */
+    for(ap=stp->ap; ap; ap=ap->next){
+      if( ap->type==REDUCE && ap->x.rp==rbest ) break;
+    }
     assert( ap );
     ap->sp = Symbol_new("{default}");
     for(ap=ap->next; ap; ap=ap->next){
-      if( ap->type==REDUCE ) ap->type = NOT_USED;
+      if( ap->type==REDUCE && ap->x.rp==rbest ) ap->type = NOT_USED;
     }
     stp->ap = Action_sort(stp->ap);
   }
 }
+
 /***************** From the file "set.c" ************************************/
 /*
 ** Set manipulation routines for the LEMON parser generator.
@@ -3517,10 +3613,11 @@ char *x;
     sp->name = Strsafe(x);
     sp->type = isupper(*x) ? TERMINAL : NONTERMINAL;
     sp->rule = 0;
+    sp->fallback = 0;
     sp->prec = -1;
     sp->assoc = UNK;
     sp->firstset = 0;
-    sp->lambda = FALSE;
+    sp->lambda = B_FALSE;
     sp->destructor = 0;
     sp->datatype = 0;
     Symbol_insert(sp,sp->name);
